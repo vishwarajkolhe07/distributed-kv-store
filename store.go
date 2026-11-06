@@ -24,8 +24,15 @@ func NewStore() *Store {
 // the data, and then appends every later change to it.
 func OpenStore(path string) (*Store, error) {
 	s := NewStore()
-	if err := s.replay(path); err != nil {
+	validLen, err := s.replay(path)
+	if err != nil {
 		return nil, err
+	}
+	// Cut off a half-written last line so new appends start on a clean line.
+	if info, statErr := os.Stat(path); statErr == nil && info.Size() > validLen {
+		if err := os.Truncate(path, validLen); err != nil {
+			return nil, fmt.Errorf("truncate torn tail: %w", err)
+		}
 	}
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
@@ -36,35 +43,40 @@ func OpenStore(path string) (*Store, error) {
 }
 
 // replay reads the log from the top and applies each command to the map.
-// A missing file just means an empty store. A corrupt line is an error for
-// now; handling a half-written last line comes in chunk 4.
-func (s *Store) replay(path string) error {
+// It returns how many bytes of the file are valid.
+//
+// A missing file just means an empty store. A last line with no trailing
+// newline is a torn write (the crash hit mid-append, before Put returned),
+// so it is ignored and not counted as valid. A complete line that does not
+// decode is real corruption and is an error.
+func (s *Store) replay(path string) (validLen int64, err error) {
 	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		return 0, nil
 	}
 	if err != nil {
-		return fmt.Errorf("open log for replay: %w", err)
+		return 0, fmt.Errorf("open log for replay: %w", err)
 	}
 	defer f.Close()
 
 	// bufio.Reader (not Scanner) so very long values don't hit a line limit.
 	r := bufio.NewReader(f)
 	for lineNo := 1; ; lineNo++ {
-		line, err := r.ReadBytes('\n')
+		line, rerr := r.ReadBytes('\n')
+		if rerr == io.EOF {
+			return validLen, nil // anything left in line is an unterminated torn tail
+		}
+		if rerr != nil {
+			return 0, fmt.Errorf("read log: %w", rerr)
+		}
 		if len(bytes.TrimSpace(line)) > 0 {
 			c, derr := DecodeCommand(line)
 			if derr != nil {
-				return fmt.Errorf("log line %d: %w", lineNo, derr)
+				return 0, fmt.Errorf("log line %d: %w", lineNo, derr)
 			}
 			s.apply(c)
 		}
-		if err == io.EOF {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("read log: %w", err)
-		}
+		validLen += int64(len(line))
 	}
 }
 
@@ -89,6 +101,11 @@ func (s *Store) appendLog(c Command) error {
 	}
 	if _, err := s.log.Write(append(line, '\n')); err != nil {
 		return fmt.Errorf("write log: %w", err)
+	}
+	// Write only hands the bytes to the OS. Sync forces them onto the disk,
+	// so a Put that returned nil survives a power cut.
+	if err := s.log.Sync(); err != nil {
+		return fmt.Errorf("sync log: %w", err)
 	}
 	return nil
 }
