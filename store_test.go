@@ -21,6 +21,17 @@ func TestGetMissing(t *testing.T) {
 	}
 }
 
+func TestOverwrite(t *testing.T) {
+	s := NewStore()
+	s.Put("alice", "500")
+	s.Put("alice", "900")
+
+	v, ok := s.Get("alice")
+	if !ok || v != "900" {
+		t.Errorf("Get(alice) = %q, %v; want \"900\", true", v, ok)
+	}
+}
+
 func TestDelete(t *testing.T) {
 	s := NewStore()
 	s.Put("alice", "500")
