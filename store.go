@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 )
 
 // Store is our key-value database.
 type Store struct {
 	data map[string]string
-	log  *os.File // nil for a purely in-memory store
+	path string   // log file path; empty for a purely in-memory store
+	log  *os.File // open for appending; nil only if path is empty (or a Compact failed to reopen)
 }
 
 // NewStore creates an empty in-memory store (nothing is saved to disk).
@@ -24,6 +26,8 @@ func NewStore() *Store {
 // the data, and then appends every later change to it.
 func OpenStore(path string) (*Store, error) {
 	s := NewStore()
+	s.path = path
+	os.Remove(path + ".tmp") // leftover from a crash during Compact; the real log is intact
 	validLen, err := s.replay(path)
 	if err != nil {
 		return nil, err
@@ -92,8 +96,11 @@ func (s *Store) apply(c Command) {
 
 // appendLog writes one command as one line to the log. No-op without a log.
 func (s *Store) appendLog(c Command) error {
-	if s.log == nil {
+	if s.path == "" {
 		return nil
+	}
+	if s.log == nil {
+		return errors.New("log is not open")
 	}
 	line, err := c.Encode()
 	if err != nil {
@@ -134,6 +141,79 @@ func (s *Store) Delete(key string) error {
 	}
 	s.apply(Command{Op: OpDelete, Key: key})
 	return nil
+}
+
+// Compact rewrites the log so it holds one put per live key and nothing
+// else. Overwritten values and deleted keys disappear from the file.
+//
+// It is crash-safe: the new log is written to path+".tmp", fsynced, and then
+// renamed over the old one. A crash at any point leaves either the complete
+// old log or the complete new log.
+func (s *Store) Compact() error {
+	if s.path == "" {
+		return nil // in-memory store, nothing to compact
+	}
+	tmp := s.path + ".tmp"
+
+	if err := s.writeSnapshot(tmp); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+
+	// Windows cannot replace a file that is open, so close the old log first.
+	if s.log != nil {
+		s.log.Close()
+		s.log = nil
+	}
+	renameErr := os.Rename(tmp, s.path)
+	if renameErr != nil {
+		os.Remove(tmp)
+	}
+
+	// Reopen for appending whether or not the rename worked: after a failed
+	// rename the old log is still the right one.
+	f, err := os.OpenFile(s.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("reopen log after compact: %w", err)
+	}
+	s.log = f
+	if renameErr != nil {
+		return fmt.Errorf("replace log: %w", renameErr)
+	}
+	return nil
+}
+
+// writeSnapshot writes one put per live key to a new file and fsyncs it.
+// Keys are sorted so the output is deterministic.
+func (s *Store) writeSnapshot(path string) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("create compacted log: %w", err)
+	}
+	defer f.Close()
+
+	keys := make([]string, 0, len(s.data))
+	for k := range s.data {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	w := bufio.NewWriter(f)
+	for _, k := range keys {
+		line, err := Command{Op: OpPut, Key: k, Value: s.data[k]}.Encode()
+		if err != nil {
+			return err
+		}
+		w.Write(line)
+		w.WriteByte('\n')
+	}
+	if err := w.Flush(); err != nil {
+		return fmt.Errorf("write compacted log: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("sync compacted log: %w", err)
+	}
+	return f.Close()
 }
 
 // Close closes the log file, if there is one.
