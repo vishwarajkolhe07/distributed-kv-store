@@ -1,7 +1,11 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 )
 
@@ -16,15 +20,62 @@ func NewStore() *Store {
 	return &Store{data: make(map[string]string)}
 }
 
-// NewStoreWithLog creates an empty store that appends every change to the
-// log file at path (creating it if needed). It does not read existing
-// contents yet; replay on startup comes in the next chunk.
-func NewStoreWithLog(path string) (*Store, error) {
+// OpenStore opens (or creates) the log file at path, replays it to rebuild
+// the data, and then appends every later change to it.
+func OpenStore(path string) (*Store, error) {
+	s := NewStore()
+	if err := s.replay(path); err != nil {
+		return nil, err
+	}
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("open log: %w", err)
 	}
-	return &Store{data: make(map[string]string), log: f}, nil
+	s.log = f
+	return s, nil
+}
+
+// replay reads the log from the top and applies each command to the map.
+// A missing file just means an empty store. A corrupt line is an error for
+// now; handling a half-written last line comes in chunk 4.
+func (s *Store) replay(path string) error {
+	f, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("open log for replay: %w", err)
+	}
+	defer f.Close()
+
+	// bufio.Reader (not Scanner) so very long values don't hit a line limit.
+	r := bufio.NewReader(f)
+	for lineNo := 1; ; lineNo++ {
+		line, err := r.ReadBytes('\n')
+		if len(bytes.TrimSpace(line)) > 0 {
+			c, derr := DecodeCommand(line)
+			if derr != nil {
+				return fmt.Errorf("log line %d: %w", lineNo, derr)
+			}
+			s.apply(c)
+		}
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("read log: %w", err)
+		}
+	}
+}
+
+// apply changes the map only; it never touches the log.
+func (s *Store) apply(c Command) {
+	switch c.Op {
+	case OpPut:
+		s.data[c.Key] = c.Value
+	case OpDelete:
+		delete(s.data, c.Key)
+	}
 }
 
 // appendLog writes one command as one line to the log. No-op without a log.
@@ -48,7 +99,7 @@ func (s *Store) Put(key, value string) error {
 	if err := s.appendLog(Command{Op: OpPut, Key: key, Value: value}); err != nil {
 		return err
 	}
-	s.data[key] = value
+	s.apply(Command{Op: OpPut, Key: key, Value: value})
 	return nil
 }
 
@@ -64,7 +115,7 @@ func (s *Store) Delete(key string) error {
 	if err := s.appendLog(Command{Op: OpDelete, Key: key}); err != nil {
 		return err
 	}
-	delete(s.data, key)
+	s.apply(Command{Op: OpDelete, Key: key})
 	return nil
 }
 

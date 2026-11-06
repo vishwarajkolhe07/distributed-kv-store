@@ -30,7 +30,7 @@ func readLog(t *testing.T, path string) []Command {
 
 func TestOperationsAreLogged(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "kv.log")
-	s, err := NewStoreWithLog(path)
+	s, err := OpenStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestOperationsAreLogged(t *testing.T) {
 }
 
 func TestLoggedStoreStillWorksInMemory(t *testing.T) {
-	s, err := NewStoreWithLog(filepath.Join(t.TempDir(), "kv.log"))
+	s, err := OpenStore(filepath.Join(t.TempDir(), "kv.log"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,11 +79,11 @@ func TestLoggedStoreStillWorksInMemory(t *testing.T) {
 func TestLogAppendsAcrossOpens(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "kv.log")
 
-	s1, _ := NewStoreWithLog(path)
+	s1, _ := OpenStore(path)
 	s1.Put("a", "1")
 	s1.Close()
 
-	s2, _ := NewStoreWithLog(path)
+	s2, _ := OpenStore(path)
 	s2.Put("b", "2")
 	s2.Close()
 
@@ -93,7 +93,7 @@ func TestLogAppendsAcrossOpens(t *testing.T) {
 }
 
 func TestPutFailsWhenLogFails(t *testing.T) {
-	s, err := NewStoreWithLog(filepath.Join(t.TempDir(), "kv.log"))
+	s, err := OpenStore(filepath.Join(t.TempDir(), "kv.log"))
 	if err != nil {
 		t.Fatal(err)
 	}
