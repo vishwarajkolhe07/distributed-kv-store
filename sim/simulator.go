@@ -13,6 +13,12 @@ type Config struct {
 	// TickInterval is how often every node's Tick is called, in simulated
 	// time. 0 means nodes are never ticked.
 	TickInterval Time
+
+	// DropRate is the probability (0 to 1) that a message is lost.
+	DropRate float64
+	// DupRate is the probability (0 to 1) that a message that is not lost
+	// is delivered twice.
+	DupRate float64
 }
 
 // Simulator runs a set of Nodes in a world it fully controls: one thread,
@@ -31,7 +37,18 @@ type Simulator struct {
 	// OnDeliver, if set, is called just before each message is handed to its
 	// destination node. Use it to record what happened.
 	OnDeliver func(at Time, msg Message)
+
+	// OnDrop, if set, is called whenever a message is lost, with the reason:
+	// "lost" (random loss), "partition" or "no such node".
+	OnDrop func(at Time, msg Message, reason string)
 }
+
+// Reasons passed to OnDrop.
+const (
+	DropLost      = "lost"
+	DropPartition = "partition"
+	DropNoNode    = "no such node"
+)
 
 // NewSimulator creates an empty simulation. It panics if cfg is invalid.
 func NewSimulator(seed uint64, cfg Config) *Simulator {
@@ -39,12 +56,25 @@ func NewSimulator(seed uint64, cfg Config) *Simulator {
 		panic("sim: TickInterval must not be negative")
 	}
 	rng := NewRand(seed)
+	net := NewNetwork(cfg.MinDelay, cfg.MaxDelay, rng.Fork("network"))
+	net.SetDropRate(cfg.DropRate)
+	net.SetDupRate(cfg.DupRate)
 	return &Simulator{
 		cfg:   cfg,
 		clock: NewClock(),
 		rng:   rng,
-		net:   NewNetwork(cfg.MinDelay, cfg.MaxDelay, rng.Fork("network")),
+		net:   net,
 		nodes: make(map[NodeID]Node),
+	}
+}
+
+// Network returns the simulated network, so a test can change its faults
+// mid-run: SetDropRate, SetDupRate, Partition and Heal.
+func (s *Simulator) Network() *Network { return s.net }
+
+func (s *Simulator) dropped(msg Message, reason string) {
+	if s.OnDrop != nil {
+		s.OnDrop(s.Now(), msg, reason)
 	}
 }
 
@@ -70,7 +100,16 @@ func (s *Simulator) AddNode(id NodeID, n Node) {
 // Send puts a message into the network, as if a node had sent it just now.
 // It is how tests and clients inject messages from outside the cluster.
 func (s *Simulator) Send(msg Message) {
-	for _, delay := range s.net.Route(msg) {
+	delays := s.net.Route(msg)
+	if len(delays) == 0 {
+		if s.net.Blocked(msg.From, msg.To) {
+			s.dropped(msg, DropPartition)
+		} else {
+			s.dropped(msg, DropLost)
+		}
+		return
+	}
+	for _, delay := range delays {
 		s.schedule(&event{at: s.Now() + delay, kind: evDeliver, msg: msg})
 	}
 }
@@ -106,8 +145,14 @@ func (s *Simulator) Step() bool {
 			s.schedule(&event{at: s.Now() + s.cfg.TickInterval, kind: evTick, node: e.node})
 		}
 	case evDeliver:
-		// A message to a node that does not exist is simply lost.
-		if n, ok := s.nodes[e.msg.To]; ok {
+		n, ok := s.nodes[e.msg.To]
+		switch {
+		case !ok:
+			s.dropped(e.msg, DropNoNode)
+		case s.net.Blocked(e.msg.From, e.msg.To):
+			// The partition started while the message was in flight.
+			s.dropped(e.msg, DropPartition)
+		default:
 			if s.OnDeliver != nil {
 				s.OnDeliver(s.Now(), e.msg)
 			}
