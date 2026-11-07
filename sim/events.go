@@ -10,11 +10,12 @@ const (
 
 // event is something scheduled to happen at a simulated time.
 type event struct {
-	at   Time
-	seq  uint64 // order the event was scheduled in; breaks ties between equal times
-	kind eventKind
-	msg  Message // for evDeliver
-	node NodeID  // for evTick
+	at    Time
+	seq   uint64 // order the event was scheduled in; breaks ties between equal times
+	kind  eventKind
+	msg   Message // for evDeliver
+	node  NodeID  // for evTick
+	epoch int     // for evTick: ignored if the node's tick epoch has moved on
 }
 
 // eventQueue is a min-heap of events ordered by (at, seq). It implements
