@@ -75,6 +75,40 @@ type Simulator struct {
 	// OnDrop, if set, is called whenever a message is lost, with one of the
 	// Drop* reasons.
 	OnDrop func(at Time, msg Message, reason string)
+
+	tracing bool
+	trace   []string
+}
+
+// EnableTrace starts recording a line for every delivery, drop, crash,
+// restart, partition and heal. Two runs with the same seed record identical
+// traces, so a trace is the evidence that a failing seed replays exactly.
+//
+// Payloads are printed with %+v, so they must not contain pointers (their
+// addresses differ between runs and would make traces differ).
+func (s *Simulator) EnableTrace() { s.tracing = true }
+
+// Trace returns the recorded lines, oldest first. It is empty unless
+// EnableTrace was called.
+func (s *Simulator) Trace() []string { return s.trace }
+
+func (s *Simulator) logf(format string, args ...any) {
+	if s.tracing {
+		s.trace = append(s.trace, fmt.Sprintf("t=%d ", s.Now())+fmt.Sprintf(format, args...))
+	}
+}
+
+// Partition splits the cluster, like Network().Partition, and records it in
+// the trace. Heal undoes it.
+func (s *Simulator) Partition(groups ...[]NodeID) {
+	s.net.Partition(groups...)
+	s.logf("PARTITION %v", groups)
+}
+
+// Heal removes any partition and records it in the trace.
+func (s *Simulator) Heal() {
+	s.net.Heal()
+	s.logf("HEAL")
 }
 
 // NewSimulator creates an empty simulation. It panics if cfg is invalid.
@@ -108,6 +142,7 @@ func (s *Simulator) Now() Time { return s.clock.Now() }
 func (s *Simulator) Network() *Network { return s.net }
 
 func (s *Simulator) dropped(msg Message, reason string) {
+	s.logf("drop(%s) %d->%d %+v", reason, msg.From, msg.To, msg.Payload)
 	if s.OnDrop != nil {
 		s.OnDrop(s.Now(), msg, reason)
 	}
@@ -174,6 +209,7 @@ func (s *Simulator) Crash(id NodeID) {
 	if !p.up {
 		return
 	}
+	s.logf("CRASH node %d", id)
 	p.up = false
 	p.node = nil
 	p.tickEpoch++ // cancel its scheduled ticks
@@ -194,6 +230,7 @@ func (s *Simulator) Restart(id NodeID) {
 	if p.factory == nil {
 		panic(fmt.Sprintf("sim: node %d was added with AddNode and cannot restart; use AddNodeWithDisk", id))
 	}
+	s.logf("RESTART node %d", id)
 	p.node = p.factory(id, p.disk)
 	p.up = true
 	s.startTicks(id, p)
@@ -295,6 +332,7 @@ func (s *Simulator) Step() bool {
 			// The partition started while the message was in flight.
 			s.dropped(e.msg, DropPartition)
 		default:
+			s.logf("deliver %d->%d %+v", e.msg.From, e.msg.To, e.msg.Payload)
 			if s.OnDeliver != nil {
 				s.OnDeliver(s.Now(), e.msg)
 			}

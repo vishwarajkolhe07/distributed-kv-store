@@ -66,6 +66,11 @@ func (n *Network) Heal() {
 	n.group = nil
 }
 
+// Partitioned reports whether a partition is currently in effect.
+func (n *Network) Partitioned() bool {
+	return n.group != nil
+}
+
 // Blocked reports whether a partition currently separates from and to.
 func (n *Network) Blocked(from, to NodeID) bool {
 	if n.group == nil {
